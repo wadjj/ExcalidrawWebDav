@@ -78,7 +78,7 @@ actor SyncCoordinator {
         let event = SyncEvent(
             fileID: fileID,
             relativePath: relativePath,
-            operation: .uploadToCloud,
+            operation: .uploadToRemote,
             timestamp: Date(),
             priority: priority
         )
@@ -96,7 +96,7 @@ actor SyncCoordinator {
         let event = SyncEvent(
             fileID: fileID,
             relativePath: relativePath,
-            operation: .downloadFromCloud,
+            operation: .downloadFromRemote,
             timestamp: Date(),
             priority: priority
         )
@@ -114,7 +114,7 @@ actor SyncCoordinator {
         let event = SyncEvent(
             fileID: fileID,
             relativePath: relativePath,
-            operation: .deleteFromCloud,
+            operation: .deleteFromRemote,
             timestamp: Date(),
             priority: priority
         )
@@ -138,9 +138,9 @@ actor SyncCoordinator {
 
         // Update UI status - mark as queued
         let queuedOp: FileSyncStatus.QueuedOperation = switch event.operation {
-            case .uploadToCloud: .upload
-            case .downloadFromCloud: .download
-            case .deleteFromCloud, .deleteFromLocal: .delete
+            case .uploadToRemote: .upload
+            case .downloadFromRemote: .download
+            case .deleteFromRemote, .deleteFromLocal: .delete
         }
         Task { @MainActor in
             FileStatusService.shared.markSyncQueued(fileID: event.fileID, operation: queuedOp)
@@ -237,9 +237,9 @@ actor SyncCoordinator {
             
             // Mark as syncing
             let syncOp: FileSyncStatus.QueuedOperation = switch event.operation {
-                case .uploadToCloud: .upload
-                case .downloadFromCloud: .download
-                case .deleteFromCloud, .deleteFromLocal: .delete
+                case .uploadToRemote: .upload
+                case .downloadFromRemote: .download
+                case .deleteFromRemote, .deleteFromLocal: .delete
             }
             await FileStatusService.shared.markSyncInProgress(fileID: event.fileID, operation: syncOp)
             
@@ -284,19 +284,19 @@ actor SyncCoordinator {
         let status = await iCloudManager.checkICloudAvailability()
         
         switch event.operation {
-            case .uploadToCloud:
+            case .uploadToRemote:
                 guard status.isAvailable else {
                     throw FileStorageError.storageUnavailable
                 }
-                try await uploadToCloud(event: event)
+                try await uploadToRemote(event: event)
                 
-            case .downloadFromCloud:
+            case .downloadFromRemote:
                 guard status.isAvailable else {
                     throw FileStorageError.storageUnavailable
                 }
-                try await downloadFromCloud(event: event)
+                try await downloadFromRemote(event: event)
                 
-            case .deleteFromCloud:
+            case .deleteFromRemote:
                 guard status.isAvailable else {
                     throw FileStorageError.storageUnavailable
                 }
@@ -317,7 +317,7 @@ actor SyncCoordinator {
     ///
     /// Conflict detection should happen at the decision layer (DiffScan, FileState),
     /// not in the execution layer (SyncCoordinator).
-    private func uploadToCloud(event: SyncEvent) async throws {
+    private func uploadToRemote(event: SyncEvent) async throws {
         // Load from local storage
         let localData = try await localManager.loadContent(relativePath: event.relativePath)
         let metadata = try await localManager.getFileMetadata(relativePath: event.relativePath)
@@ -341,7 +341,7 @@ actor SyncCoordinator {
     /// Downloads file content from iCloud and saves to local storage.
     /// Note: On iOS, the modificationDate read from iCloud may be cached/stale
     /// if metadata wasn't refreshed before calling this method.
-    private func downloadFromCloud(event: SyncEvent) async throws {
+    private func downloadFromRemote(event: SyncEvent) async throws {
         // Load from iCloud
         let iCloudData = try await iCloudManager.loadContent(relativePath: event.relativePath)
         
@@ -419,98 +419,67 @@ actor SyncCoordinator {
             let iCloudFile = iCloudMap[compositeKey]
             
             switch (localFile, iCloudFile) {
-                case (let local?, let cloud?):
-                    // File exists in both
-                    
-#if os(macOS)
-                    // macOS: For .notDownloaded files, compare timestamps first to avoid unnecessary downloads
-                    // macOS placeholder metadata is synced from iCloud and is reliable for timestamp comparison
-                    if let downloadStatus = cloud.downloadStatus, downloadStatus == .notDownloaded {
-                        // Compare timestamps
-                        let timeDifference = local.modifiedAt.timeIntervalSince(cloud.modifiedAt)
+                case (let local?, let remote?):
+                    let decision = resolveDiffDecision(local: local, remote: remote, tolerance: tolerance)
 
-                        if timeDifference < -tolerance {
-                            // Cloud is newer, download it
-                            logger.info("Cloud file not downloaded but newer: \(compositeKey), local<\(local.modifiedAt)> cloud<\(cloud.modifiedAt)>, downloading")
-                            syncOperations.append(SyncEvent(
-                                fileID: cloud.fileID,
-                                relativePath: cloud.relativePath,
-                                operation: .downloadFromCloud,
-                                timestamp: Date(),
-                                priority: .normal  // DiffScan: background priority
-                            ))
-                        } else if timeDifference > tolerance {
-                            // Local is newer, upload to ensure cloud has latest
-                            logger.info("Cloud file not downloaded and older: \(compositeKey), local<\(local.modifiedAt)> cloud<\(cloud.modifiedAt)>, uploading")
+                    switch decision {
+                        case .localNewer:
+                            logger.info("Local newer: \(compositeKey), queuing upload")
                             syncOperations.append(SyncEvent(
                                 fileID: local.fileID,
                                 relativePath: local.relativePath,
-                                operation: .uploadToCloud,
+                                operation: .uploadToRemote,
                                 timestamp: Date(),
-                                priority: .normal  // DiffScan: background priority
+                                priority: .normal
                             ))
-                        } else {
-                            // Within tolerance, in sync - skip download
-                            logger.debug("Cloud file not downloaded but in sync: \(compositeKey), skipping")
-                        }
-                        continue
+                        case .remoteNewer:
+                            logger.info("Remote newer: \(compositeKey), queuing download")
+                            syncOperations.append(SyncEvent(
+                                fileID: remote.fileID,
+                                relativePath: remote.relativePath,
+                                operation: .downloadFromRemote,
+                                timestamp: Date(),
+                                priority: .normal
+                            ))
+                        case .ambiguous:
+                            logger.warning("Ambiguous diff for \(compositeKey); queuing safe remote-first resolution path")
+                            syncOperations.append(SyncEvent(
+                                fileID: remote.fileID,
+                                relativePath: remote.relativePath,
+                                operation: .downloadFromRemote,
+                                timestamp: Date(),
+                                priority: .normal
+                            ))
+                        case .inSync:
+                            break
                     }
-#endif
-                    
-                    // Compare timestamps
-                    let timeDifference = local.modifiedAt.timeIntervalSince(cloud.modifiedAt)
-                    
-                    if timeDifference > tolerance {
-                        logger.info("Local newer: \(compositeKey), local<\(local.modifiedAt)> cloud<\(cloud.modifiedAt)>")
-                        syncOperations.append(SyncEvent(
-                            fileID: local.fileID,
-                            relativePath: local.relativePath,
-                            operation: .uploadToCloud,
-                            timestamp: Date(),
-                            priority: .normal  // DiffScan: background priority
-                        ))
-                    } else if timeDifference < -tolerance {
-                        logger.info("Cloud newer: \(compositeKey), local<\(local.modifiedAt)> cloud<\(cloud.modifiedAt)>")
-                        syncOperations.append(SyncEvent(
-                            fileID: cloud.fileID,
-                            relativePath: cloud.relativePath,
-                            operation: .downloadFromCloud,
-                            timestamp: Date(),
-                            priority: .normal  // DiffScan: background priority
-                        ))
-                    }
-                    // If within tolerance, files are in sync - skip
-                    
+
                 case (let local?, nil):
-                    // File exists locally but not in iCloud
                     if status.isAvailable {
-                        logger.info("Local only: \(local.relativePath), uploading to cloud")
+                        logger.info("Local only: \(local.relativePath), uploading to remote")
                         syncOperations.append(SyncEvent(
                             fileID: local.fileID,
                             relativePath: local.relativePath,
-                            operation: .uploadToCloud,
+                            operation: .uploadToRemote,
                             timestamp: Date(),
-                            priority: .normal  // DiffScan: background priority
+                            priority: .normal
                         ))
                     }
-                    
-                case (nil, let cloud?):
-                    // File exists in iCloud but not locally
-                    logger.info("Cloud only: \(cloud.relativePath), downloading from cloud")
+
+                case (nil, let remote?):
+                    logger.info("Remote only: \(remote.relativePath), downloading from remote")
                     syncOperations.append(SyncEvent(
-                        fileID: cloud.fileID,
-                        relativePath: cloud.relativePath,
-                        operation: .downloadFromCloud,
+                        fileID: remote.fileID,
+                        relativePath: remote.relativePath,
+                        operation: .downloadFromRemote,
                         timestamp: Date(),
-                        priority: .normal  // DiffScan: background priority
+                        priority: .normal
                     ))
-                    
+
                 case (nil, nil):
-                    // File missing from both local and iCloud
                     missingCount += 1
                     logger.warning("File missing from both: \(compositeKey) (fileID: \(expectedFile.fileID))")
-                    
-                    // Mark as missing in UI
+
                     Task { @MainActor in
                         FileStatusService.shared.markMissing(fileID: expectedFile.fileID, failureCount: 3)
                     }
@@ -547,6 +516,53 @@ actor SyncCoordinator {
         // Process queue once after all operations are queued
         await processQueue()
     }
+
+    private enum DiffDecision {
+        case localNewer
+        case remoteNewer
+        case inSync
+        case ambiguous
+    }
+
+    private func resolveDiffDecision(local: SyncFileState, remote: SyncFileState, tolerance: TimeInterval) -> DiffDecision {
+        if let localToken = local.versionToken, let remoteToken = remote.versionToken {
+            if localToken == remoteToken {
+                return .inSync
+            }
+
+            // Strong tokens disagree, but ordering is unknown across backends.
+            // Never overwrite remote from an ambiguous state.
+            return .ambiguous
+        }
+
+#if os(macOS)
+        if remote.remoteSyncState == .notDownloaded {
+            // Placeholder metadata cannot guarantee full local-vs-remote ordering.
+            // Safest path is remote-first materialization.
+            return .ambiguous
+        }
+#endif
+
+        let sameSize = local.size == remote.size
+        let timeDifference = local.modifiedAt.timeIntervalSince(remote.modifiedAt)
+
+        if sameSize && abs(timeDifference) <= tolerance {
+            return .inSync
+        }
+
+        if timeDifference > tolerance {
+            return .localNewer
+        }
+
+        if timeDifference < -tolerance {
+            return .remoteNewer
+        }
+
+        // Timestamp close but size differs, or size/time insufficiently conclusive.
+        // Never overwrite remote on uncertain ordering.
+        return .ambiguous
+    }
+
 
     private func scheduleOrphanCleanup() {
         guard orphanCleanupTask == nil else { return }
@@ -704,10 +720,10 @@ actor SyncCoordinator {
             let downloadEvent = SyncEvent(
                 fileID: fileID,
                 relativePath: relativePath,
-                operation: .downloadFromCloud,
+                operation: .downloadFromRemote,
                 timestamp: Date()
             )
-            try await downloadFromCloud(event: downloadEvent)
+            try await downloadFromRemote(event: downloadEvent)
         }
         
         // Load from local storage
