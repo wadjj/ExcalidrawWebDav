@@ -26,12 +26,15 @@ struct GeneralSettingsView: View {
     @EnvironmentObject var updateChecker: UpdateChecker
 #endif
     @EnvironmentObject var appPreference: AppPreference
-    
+
     @AppStorage("DisableCloudSync") var isICloudDisabled: Bool = false
-    
+
     @AppStorage("FolderStructureStyle") var folderStructStyle: FolderStructureStyle = .disclosureGroup
-    
+
     @State private var isDisclosureGroupUnspportedAlertPresented = false
+    @State private var webdavConnectionStatus: String?
+    @State private var isTestingWebDAVConnection = false
+
     struct DisclosureGroupUnspportedError: LocalizedError {
         var errorDescription: String? {
             "Disclosure Group Style is unavailable below macOS 13.0."
@@ -53,7 +56,7 @@ struct GeneralSettingsView: View {
             }
         }
     }
-    
+
     @MainActor @ViewBuilder
     private func content() -> some View {
         Section {
@@ -83,7 +86,63 @@ struct GeneralSettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        
+
+        Section {
+            Picker("Sync Provider", selection: $appPreference.syncProvider) {
+                ForEach(AppPreference.SyncProvider.allCases) { provider in
+                    Text(provider.title).tag(provider)
+                }
+            }
+
+            if appPreference.syncProvider == .webdav {
+                TextField("Server URL", text: $appPreference.webdavServerURL)
+                    .textInputAutocapitalization(.never)
+#if os(iOS)
+                    .autocorrectionDisabled(true)
+#endif
+                TextField("Base Path", text: $appPreference.webdavBasePath)
+                TextField("Username", text: $appPreference.webdavUsername)
+                SecureField("Password", text: $appPreference.webdavPassword)
+
+                HStack {
+                    Button(appPreference.webdavHasStoredCredential ? "Update Password in Keychain" : "Save Password to Keychain") {
+                        appPreference.webdavHasStoredCredential = !appPreference.webdavPassword.isEmpty
+                    }
+                    .disabled(appPreference.webdavPassword.isEmpty)
+
+                    Spacer()
+
+                    AsyncButton {
+                        await testWebDAVConnection()
+                    } label: {
+                        if isTestingWebDAVConnection {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text("Test Connection")
+                        }
+                    }
+                    .disabled(isTestingWebDAVConnection || appPreference.webdavServerURL.isEmpty)
+                }
+
+                if let webdavConnectionStatus {
+                    Text(webdavConnectionStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack {
+                StatusBadge(title: "iCloud unavailable", isVisible: !appPreference.isICloudAvailable)
+                StatusBadge(title: "WebDAV connected", isVisible: appPreference.syncProvider == .webdav && appPreference.webdavLastConnected)
+                StatusBadge(title: "offline queue active", isVisible: appPreference.syncProvider == .webdav && !appPreference.webdavLastConnected)
+            }
+        } header: {
+            Text("Sync")
+        } footer: {
+            Text("iCloud remains the default provider. Switch to WebDAV only if you need it.")
+        }
+
         // Folder structure UI
         Section {
             HStack {
@@ -108,7 +167,7 @@ struct GeneralSettingsView: View {
                     isPresented: $isDisclosureGroupUnspportedAlertPresented,
                     error: DisclosureGroupUnspportedError()
                 ) {
-                    
+
                 }
             }
         } footer: {
@@ -121,14 +180,14 @@ struct GeneralSettingsView: View {
                                 Image(systemSymbol: .chevronDown).font(.footnote)
                                 Text(.localizable(.generalFolderName))
                             }
-                            
+
                             VStack(spacing: 4) {
                                 Text(.localizable(.generalSubfolderName))
                                 Text(.localizable(.generalSubfolderName))
                             }
                             .padding(.leading, 24)
                         }
-                        
+
                         HStack(spacing: 4) {
                             Image(systemSymbol: .chevronDown).font(.footnote).opacity(0)
                             Text(.localizable(.generalFolderName))
@@ -137,9 +196,9 @@ struct GeneralSettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxWidth: 160)
-                
+
                 Divider()
-                
+
                 VStack(spacing: 10) {
                     let children: [FolderChildren] = [FolderChildren(), FolderChildren()]
                     let children2: [FolderChildren] = []
@@ -148,18 +207,18 @@ struct GeneralSettingsView: View {
                         VStack(alignment: .leading, spacing: 0) {
                             TreeStructureView(children: children) {
                                 Text(.localizable(.generalFolderName))
-                            } childView: { child in
+                            } childView: { _ in
                                 TreeStructureView(children: children2) {
                                     Text(.localizable(.generalSubfolderName))
-                                } childView: { child in
-                                    
+                                } childView: { _ in
+
                                 }
                             }
                         }
                         TreeStructureView(children: children) {
                             Text(.localizable(.generalFolderName)).padding(.vertical, 4)
                         } childView: { _ in
-                            
+
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -168,7 +227,7 @@ struct GeneralSettingsView: View {
             }
             .foregroundStyle(.secondary)
         }
-        
+
 #if DEBUG
         Section {
             let containerShape = RoundedRectangle(cornerRadius: 8)
@@ -192,7 +251,7 @@ struct GeneralSettingsView: View {
                         }
                 }
             }
-            
+
             HStack(alignment: .top, spacing: 20) {
                 Text("Inspector").font(.headline).foregroundStyle(.secondary)
                 Spacer()
@@ -217,7 +276,7 @@ struct GeneralSettingsView: View {
             Text("Layout")
         }
 #endif
-        
+
 #if os(macOS) && !APP_STORE
         Section {
             Toggle(.localizable(.settingsUpdatesAutoCheckLabel), isOn: $updateChecker.canCheckForUpdates)
@@ -239,7 +298,7 @@ struct GeneralSettingsView: View {
             }
         }
 #endif // os(macOS) && !APP_STORE
-        
+
         Section {
             Toggle(
                 .localizable(.settingsICloudToggleDisable),
@@ -254,7 +313,7 @@ struct GeneralSettingsView: View {
         } header: {
             Text(localizable: .settingsICloudTitle)
         }
-        
+
         Section {} footer: {
             AsyncButton {
                 try await PersistenceController.shared.refreshIndices()
@@ -263,7 +322,39 @@ struct GeneralSettingsView: View {
             }
         }
     }
-    
+
+    @MainActor
+    private func testWebDAVConnection() async {
+        isTestingWebDAVConnection = true
+        defer { isTestingWebDAVConnection = false }
+
+        guard let url = URL(string: appPreference.webdavServerURL) else {
+            webdavConnectionStatus = "Invalid server URL."
+            appPreference.webdavLastConnected = false
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+
+        if !appPreference.webdavUsername.isEmpty || !appPreference.webdavPassword.isEmpty {
+            let credential = "\(appPreference.webdavUsername):\(appPreference.webdavPassword)"
+            guard let data = credential.data(using: .utf8) else { return }
+            request.setValue("Basic \(data.base64EncodedString())", forHTTPHeaderField: "Authorization")
+        }
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let isConnected = (200..<500).contains(statusCode)
+            appPreference.webdavLastConnected = isConnected
+            webdavConnectionStatus = isConnected ? "Connected successfully." : "Connection failed (\(statusCode))."
+        } catch {
+            appPreference.webdavLastConnected = false
+            webdavConnectionStatus = "Connection failed: \(error.localizedDescription)"
+        }
+    }
+
     @MainActor @ViewBuilder
     func settingCellView<T: View, V: View>(
         _ title: LocalizedStringKey,
@@ -277,8 +368,24 @@ struct GeneralSettingsView: View {
                 Spacer()
                 trailing()
             }
-            
+
             content()
+        }
+    }
+}
+
+private struct StatusBadge: View {
+    let title: String
+    let isVisible: Bool
+
+    var body: some View {
+        if isVisible {
+            Text(title)
+                .font(.caption)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(.thinMaterial)
+                .clipShape(Capsule())
         }
     }
 }
@@ -296,7 +403,7 @@ struct GeneralSettingsView: View {
 #Preview {
     if #available(macOS 13.0, *) {
         Form {
-            
+
         }
         .formStyle(.grouped)
         .environmentObject(AppPreference())

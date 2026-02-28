@@ -42,6 +42,7 @@ struct ContentView: View {
     @State private var cloudContainerEventChangeListener: AnyCancellable?
     
     @State private var isFirstAppear = true
+    @State private var isWebDAVPromptPresented = false
     
     var body: some View {
         content()
@@ -80,6 +81,21 @@ struct ContentView: View {
                 handleToggleInspector(notification)
             }
             .withContainerSize()
+            .overlay(alignment: .top) {
+                if isWebDAVPromptPresented {
+                    webDAVFallbackPrompt
+                        .padding(.top, 8)
+                }
+            }
+            .onAppear {
+                evaluateSyncProviderAvailability()
+            }
+            .onChange(of: appPreference.isICloudAvailable) { _ in
+                evaluateSyncProviderAvailability()
+            }
+            .onChange(of: appPreference.syncProvider) { _ in
+                evaluateSyncProviderAvailability()
+            }
             .task { await prepare() }
     }
     
@@ -106,6 +122,32 @@ struct ContentView: View {
         }
     }
     
+
+    @ViewBuilder
+    private var webDAVFallbackPrompt: some View {
+        HStack(spacing: 12) {
+            Text("iCloud is currently unavailable.")
+                .font(.subheadline)
+            Button("Configure WebDAV now") {
+                appPreference.syncProvider = .webdav
+                isWebDAVPromptPresented = false
+            }
+            Button("Not now") {
+                isWebDAVPromptPresented = false
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .shadow(radius: 3)
+    }
+
+    private func evaluateSyncProviderAvailability() {
+        isWebDAVPromptPresented = appPreference.syncProvider == .iCloud && !appPreference.isICloudAvailable
+    }
+
     private func handleImport(_ notification: Notification) {
         guard let urls = notification.object as? [URL] else { return }
         if window?.isKeyWindow == true {
@@ -143,11 +185,13 @@ struct ContentView: View {
     
     // Check if it is first launch by checking the files count.
     private func prepare() async {
+        appPreference.refreshICloudAvailability()
         self.cloudContainerEventChangeListener?.cancel()
         self.cloudContainerEventChangeListener = NotificationCenter.default.publisher(
             for: NSPersistentCloudKitContainer.eventChangedNotification
         ).sink { notification in
             Task {
+                appPreference.refreshICloudAvailability()
                 try? await fileState.mergeDefaultGroupAndTrashIfNeeded(context: viewContext)
             }
         }
