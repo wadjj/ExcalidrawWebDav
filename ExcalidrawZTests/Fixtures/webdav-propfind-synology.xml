@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/webdav/Notes/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:resourcetype><D:collection/></D:resourcetype>
+      </D:prop>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/webdav/Notes/sketch.excalidraw</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getlastmodified>Wed, 21 Oct 2015 07:28:00 GMT</D:getlastmodified>
+        <D:getcontentlength>2048</D:getcontentlength>
+        <D:getetag>"synology-etag-42"</D:getetag>
+        <D:getcontenttype>application/octet-stream</D:getcontenttype>
+      </D:prop>
+    </D:propstat>
+  </D:response>
+</D:multistatus>
