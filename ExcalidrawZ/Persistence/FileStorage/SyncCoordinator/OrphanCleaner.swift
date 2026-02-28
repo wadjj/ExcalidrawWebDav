@@ -13,11 +13,11 @@ import Logging
 struct OrphanCleaner {
     private let logger = Logger(label: "OrphanCleaner")
     private let localManager: LocalStorageManager
-    private let iCloudManager: iCloudDriveFileManager
+    private let backend: any CloudStorageBackend
 
-    init(localManager: LocalStorageManager, iCloudManager: iCloudDriveFileManager) {
+    init(localManager: LocalStorageManager, backend: any CloudStorageBackend) {
         self.localManager = localManager
-        self.iCloudManager = iCloudManager
+        self.backend = backend
     }
 
     // MARK: - Cleanup Operations
@@ -45,7 +45,7 @@ struct OrphanCleaner {
             let validIDs = getValidIDs(for: file.contentType, from: validFileIDs)
             if !validIDs.contains(file.fileID) {
                 logger.info("Removing orphaned iCloud file: \(file.relativePath)")
-                try? await iCloudManager.deleteContent(relativePath: file.relativePath)
+                try? await backend.deleteContent(relativePath: file.relativePath)
                 deletedCount += 1
             }
         }

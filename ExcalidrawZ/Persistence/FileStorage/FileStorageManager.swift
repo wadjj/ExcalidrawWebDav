@@ -112,7 +112,7 @@ actor FileStorageManager {
 
     // Managed components
     private let localManager: LocalStorageManager
-    private let iCloudManager: iCloudDriveFileManager
+    private let cloudBackend: any CloudStorageBackend
 
     // SyncCoordinator is initialized after migration completes
     private var syncCoordinator: SyncCoordinator?
@@ -130,11 +130,31 @@ actor FileStorageManager {
     typealias StorageDirectory = LocalStorageManager.StorageDirectory
     typealias ContentType = FileStorageContentType
 
+
+    private static let providerDefaultsKey = "cloudStorageProvider"
+
+    private static func selectedProvider() -> CloudStorageProvider {
+        guard let rawValue = UserDefaults.standard.string(forKey: providerDefaultsKey),
+              let provider = CloudStorageProvider(rawValue: rawValue) else {
+            return .iCloud
+        }
+        return provider
+    }
+
+    private static func createBackend(provider: CloudStorageProvider) -> any CloudStorageBackend {
+        switch provider {
+            case .iCloud:
+                return ICloudBackendAdapter()
+            case .webDAV:
+                return WebDAVBackendAdapter()
+        }
+    }
+
     // MARK: - Initialization
 
     private init() {
         self.localManager = LocalStorageManager()
-        self.iCloudManager = iCloudDriveFileManager()
+        self.cloudBackend = Self.createBackend(provider: Self.selectedProvider())
         // SyncCoordinator will be initialized after migration via enableSync()
     }
 
@@ -150,7 +170,7 @@ actor FileStorageManager {
         logger.info("Initializing SyncCoordinator...")
         syncCoordinator = SyncCoordinator(
             localManager: localManager,
-            iCloudManager: iCloudManager
+            cloudBackend: cloudBackend
         )
         logger.info("FileStorage sync enabled")
 
@@ -386,7 +406,7 @@ actor FileStorageManager {
 
     /// Get current iCloud availability status
     func getCurrentICloudStatus() async -> ICloudAvailabilityStatus {
-        return await iCloudManager.getCurrentStatus()
+        return await cloudBackend.getCurrentStatus()
     }
 
     /// Get number of pending sync operations
@@ -454,11 +474,16 @@ actor FileStorageManager {
     ///   - relativePath: The relative path to the file
     ///   - fileID: The file identifier
     /// - Returns: True if iCloud has a newer version
-    func checkForICloudUpdate(relativePath: String, fileID: String) async throws -> Bool {
+    func checkForRemoteUpdate(relativePath: String, fileID: String) async throws -> Bool {
         guard let syncCoordinator = syncCoordinator else {
-            logger.warning("checkForICloudUpdate called before sync enabled, returning false")
+            logger.warning("checkForRemoteUpdate called before sync enabled, returning false")
             return false
         }
-        return try await syncCoordinator.checkForICloudUpdate(relativePath: relativePath)
+        return try await syncCoordinator.checkForRemoteUpdate(relativePath: relativePath)
+    }
+
+    /// Backward-compatible alias.
+    func checkForICloudUpdate(relativePath: String, fileID: String) async throws -> Bool {
+        try await checkForRemoteUpdate(relativePath: relativePath, fileID: fileID)
     }
 }

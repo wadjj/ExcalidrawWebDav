@@ -16,7 +16,7 @@ actor SyncCoordinator {
     
     // Dependencies
     private let localManager: LocalStorageManager
-    private let iCloudManager: iCloudDriveFileManager
+    private let cloudBackend: any CloudStorageBackend
     
     // Components
     private let syncQueue: SyncQueue
@@ -25,8 +25,8 @@ actor SyncCoordinator {
     
     // Sync state
     private var isSyncing = false
-    private var lastKnownICloudAvailability: Bool? = nil
-    private var iCloudStatusSubscription: AnyCancellable?
+    private var lastKnownBackendAvailability: Bool? = nil
+    private var availabilityStatusSubscription: AnyCancellable?
     
     // Debounce state
     private var pendingProcessTask: Task<Void, Never>?
@@ -45,14 +45,14 @@ actor SyncCoordinator {
     
     // MARK: - Initialization
     
-    init(localManager: LocalStorageManager, iCloudManager: iCloudDriveFileManager) {
+    init(localManager: LocalStorageManager, cloudBackend: any CloudStorageBackend) {
         self.localManager = localManager
-        self.iCloudManager = iCloudManager
+        self.cloudBackend = cloudBackend
         
         // Initialize components
         self.syncQueue = SyncQueue()
-        self.fileEnumerator = FileEnumerator(localManager: localManager, iCloudManager: iCloudManager)
-        self.orphanCleaner = OrphanCleaner(localManager: localManager, iCloudManager: iCloudManager)
+        self.fileEnumerator = FileEnumerator(localManager: localManager, backend: cloudBackend)
+        self.orphanCleaner = OrphanCleaner(localManager: localManager, backend: cloudBackend)
         
         // Start monitoring and process queued operations
         Task {
@@ -170,27 +170,27 @@ actor SyncCoordinator {
     
     /// Start monitoring iCloud availability
     private func startMonitoring() async {
-        await iCloudManager.startMonitoringICloudAvailability()
+        await cloudBackend.startMonitoringAvailability()
         
         // Subscribe to status changes
-        iCloudStatusSubscription = await iCloudManager.iCloudStatusPublisher
+        availabilityStatusSubscription = await cloudBackend.getAvailabilityPublisher()
             .sink { [weak self] status in
                 guard let self = self else { return }
                 Task {
-                    await self.handleICloudStatusChange(status)
+                    await self.handleAvailabilityStatusChange(status)
                 }
             }
     }
     
     /// Handle iCloud status changes
-    private func handleICloudStatusChange(_ status: ICloudAvailabilityStatus) async {
+    private func handleAvailabilityStatusChange(_ status: ICloudAvailabilityStatus) async {
         logger.info("iCloud status changed: \(String(describing: status))")
         
-        let wasAvailable = lastKnownICloudAvailability ?? false
+        let wasAvailable = lastKnownBackendAvailability ?? false
         let isNowAvailable = status.isAvailable
         
         // Update last known status
-        lastKnownICloudAvailability = isNowAvailable
+        lastKnownBackendAvailability = isNowAvailable
         
         if isNowAvailable {
             if !wasAvailable {
@@ -281,26 +281,26 @@ actor SyncCoordinator {
     
     /// Execute a single sync operation
     private func executeSyncOperation(_ event: SyncEvent) async throws {
-        let status = await iCloudManager.checkICloudAvailability()
+        let status = await cloudBackend.checkAvailability()
         
         switch event.operation {
             case .uploadToCloud:
                 guard status.isAvailable else {
                     throw FileStorageError.storageUnavailable
                 }
-                try await uploadToCloud(event: event)
+                try await uploadToRemote(event: event)
                 
             case .downloadFromCloud:
                 guard status.isAvailable else {
                     throw FileStorageError.storageUnavailable
                 }
-                try await downloadFromCloud(event: event)
+                try await downloadFromRemote(event: event)
                 
             case .deleteFromCloud:
                 guard status.isAvailable else {
                     throw FileStorageError.storageUnavailable
                 }
-                try await iCloudManager.deleteContent(relativePath: event.relativePath)
+                try await cloudBackend.deleteContent(relativePath: event.relativePath)
                 
             case .deleteFromLocal:
                 try await localManager.deleteContent(relativePath: event.relativePath)
@@ -317,7 +317,7 @@ actor SyncCoordinator {
     ///
     /// Conflict detection should happen at the decision layer (DiffScan, FileState),
     /// not in the execution layer (SyncCoordinator).
-    private func uploadToCloud(event: SyncEvent) async throws {
+    private func uploadToRemote(event: SyncEvent) async throws {
         // Load from local storage
         let localData = try await localManager.loadContent(relativePath: event.relativePath)
         let metadata = try await localManager.getFileMetadata(relativePath: event.relativePath)
@@ -328,7 +328,7 @@ actor SyncCoordinator {
         }
         
         // Upload to iCloud with conflict resolution
-        let _ = try await iCloudManager.uploadToICloud(
+        let _ = try await cloudBackend.upload(
             fileID: event.fileID,
             localData: localData,
             localUpdatedAt: metadata.modifiedAt,
@@ -341,12 +341,12 @@ actor SyncCoordinator {
     /// Downloads file content from iCloud and saves to local storage.
     /// Note: On iOS, the modificationDate read from iCloud may be cached/stale
     /// if metadata wasn't refreshed before calling this method.
-    private func downloadFromCloud(event: SyncEvent) async throws {
+    private func downloadFromRemote(event: SyncEvent) async throws {
         // Load from iCloud
-        let iCloudData = try await iCloudManager.loadContent(relativePath: event.relativePath)
+        let iCloudData = try await cloudBackend.loadContent(relativePath: event.relativePath)
         
         // Get iCloud metadata
-        let iCloudURL = try await iCloudManager.getFileURL(relativePath: event.relativePath)
+        let iCloudURL = try await cloudBackend.getFileURL(relativePath: event.relativePath)
         let attributes = try FileManager.default.attributesOfItem(atPath: iCloudURL.filePath)
         let iCloudModifiedAt = attributes[.modificationDate] as? Date ?? Date()
         
@@ -385,8 +385,8 @@ actor SyncCoordinator {
         }
         
         // Check iCloud availability
-        let status = await iCloudManager.checkICloudAvailability()
-        lastKnownICloudAvailability = status.isAvailable
+        let status = await cloudBackend.checkAvailability()
+        lastKnownBackendAvailability = status.isAvailable
         
         // Step 1: Get all files that should exist from CoreData
         let expectedFiles = await fileEnumerator.enumerateExpectedFiles()
@@ -561,7 +561,7 @@ actor SyncCoordinator {
     private func performOrphanCleanup() async {
         defer { orphanCleanupTask = nil }
 
-        let status = await iCloudManager.checkICloudAvailability()
+        let status = await cloudBackend.checkAvailability()
         guard status.isAvailable else {
             logger.info("Skipping orphan cleanup: iCloud unavailable, rescheduling")
             scheduleOrphanCleanup()
@@ -612,32 +612,23 @@ actor SyncCoordinator {
     }
 
     private func triggerContainerDownloadIfNeeded() async {
-        guard let containerURL = await iCloudManager.containerURL else {
-            logger.warning("iCloud container URL unavailable, cannot trigger download")
-            return
-        }
-        do {
-            try FileManager.default.startDownloadingUbiquitousItem(at: containerURL)
-            logger.info("Triggered iCloud container download")
-        } catch {
-            logger.warning("Failed to start iCloud container download: \(error.localizedDescription)")
-        }
+        await cloudBackend.triggerContainerDownloadIfNeeded()
     }
     
     // MARK: - Helper Methods
     
     /// Check if iCloud has newer version than local
-    func checkForICloudUpdate(relativePath: String) async throws -> Bool {
+    func checkForRemoteUpdate(relativePath: String) async throws -> Bool {
         // Check if file exists locally
         guard await localManager.fileExists(relativePath: relativePath) else {
             // File doesn't exist locally, check if it exists in iCloud
-            let status = await iCloudManager.checkICloudAvailability()
+            let status = await cloudBackend.checkAvailability()
             guard status.isAvailable else {
                 return false
             }
             
             // Check if file actually exists in iCloud
-            guard let iCloudURL = try? await iCloudManager.getFileURL(relativePath: relativePath),
+            guard let iCloudURL = try? await cloudBackend.getFileURL(relativePath: relativePath),
                   FileManager.default.fileExists(at: iCloudURL) else {
                 return false  // File doesn't exist in iCloud either
             }
@@ -651,31 +642,18 @@ actor SyncCoordinator {
         let localModifiedAt = metadata.modifiedAt
         
         // Check iCloud availability
-        let status = await iCloudManager.checkICloudAvailability()
+        let status = await cloudBackend.checkAvailability()
         guard status.isAvailable else {
             return false
         }
         
         // Get iCloud modification date
-        let iCloudURL = try await iCloudManager.getFileURL(relativePath: relativePath)
+        let iCloudURL = try await cloudBackend.getFileURL(relativePath: relativePath)
         guard FileManager.default.fileExists(at: iCloudURL) else {
             return false
         }
         
-#if os(iOS)
-        // iOS: Force refresh metadata from iCloud before checking timestamps
-        // On iOS, placeholder files may have cached/stale timestamps that don't reflect
-        // the actual iCloud state. startDownloadingUbiquitousItem forces iOS to refresh
-        // metadata from iCloud, ensuring we get accurate modification times.
-        do {
-            try FileManager.default.startDownloadingUbiquitousItem(at: iCloudURL)
-            // Give it a moment to update metadata
-            try? await Task.sleep(nanoseconds: 100_000_000)  // 100ms
-        } catch {
-            logger.warning("Failed to refresh iCloud metadata for \(relativePath): \(error)")
-            // Continue anyway and check with cached metadata
-        }
-#endif
+        await cloudBackend.refreshMetadataIfNeeded(fileURL: iCloudURL)
         
         let attributes = try FileManager.default.attributesOfItem(atPath: iCloudURL.filePath)
         guard let iCloudModifiedAt = attributes[.modificationDate] as? Date else {
@@ -697,7 +675,7 @@ actor SyncCoordinator {
     /// Load content with iCloud version check
     func loadContentWithSync(relativePath: String, fileID: String) async throws -> Data {
         // Check if iCloud has newer version
-        if try await checkForICloudUpdate(relativePath: relativePath) {
+        if try await checkForRemoteUpdate(relativePath: relativePath) {
             logger.info("iCloud has newer version, downloading: \(relativePath)")
             
             // Download from iCloud
@@ -707,7 +685,7 @@ actor SyncCoordinator {
                 operation: .downloadFromCloud,
                 timestamp: Date()
             )
-            try await downloadFromCloud(event: downloadEvent)
+            try await downloadFromRemote(event: downloadEvent)
         }
         
         // Load from local storage

@@ -13,11 +13,11 @@ import Logging
 struct FileEnumerator {
     private let logger = Logger(label: "FileEnumerator")
     private let localManager: LocalStorageManager
-    private let iCloudManager: iCloudDriveFileManager
+    private let backend: any CloudStorageBackend
 
-    init(localManager: LocalStorageManager, iCloudManager: iCloudDriveFileManager) {
+    init(localManager: LocalStorageManager, backend: any CloudStorageBackend) {
         self.localManager = localManager
-        self.iCloudManager = iCloudManager
+        self.backend = backend
     }
 
     // MARK: - File Enumeration
@@ -86,7 +86,7 @@ struct FileEnumerator {
     func enumerateICloudFiles() async throws -> [SyncFileState] {
         var files: [SyncFileState] = []
 
-        guard let containerURL = await iCloudManager.containerURL else {
+        guard let containerURL = await backend.getContainerURL() else {
             return files
         }
 
@@ -109,20 +109,7 @@ struct FileEnumerator {
             }
             let fileID = String(fileIDSubstring)
 
-            #if os(iOS)
-            // iOS: Force refresh metadata from iCloud
-            // On iOS, placeholder files may have cached timestamps that don't reflect
-            // the actual iCloud state. startDownloadingUbiquitousItem forces iOS to
-            // refresh metadata from iCloud.
-            do {
-                try fileManager.startDownloadingUbiquitousItem(at: fileURL)
-                // Give it a moment to update metadata
-                try? await Task.sleep(nanoseconds: 100_000_000)  // 100ms
-            } catch {
-                logger.warning("Failed to refresh iCloud metadata for \(fileURL.lastPathComponent): \(error)")
-                // Continue anyway with cached metadata
-            }
-            #endif
+            await backend.refreshMetadataIfNeeded(fileURL: fileURL)
 
             // Get metadata
             let attributes = try fileManager.attributesOfItem(atPath: fileURL.filePath)
