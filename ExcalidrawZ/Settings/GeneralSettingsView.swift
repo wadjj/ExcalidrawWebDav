@@ -102,13 +102,30 @@ struct GeneralSettingsView: View {
 #endif
                 TextField("Base Path", text: $appPreference.webdavBasePath)
                 TextField("Username", text: $appPreference.webdavUsername)
+                    .onChange(of: appPreference.webdavUsername) { _ in
+                        if let password = appPreference.loadWebDAVPasswordFromKeychain() {
+                            appPreference.webdavPassword = password
+                            appPreference.webdavHasStoredCredential = true
+                        } else {
+                            appPreference.webdavPassword = ""
+                            appPreference.webdavHasStoredCredential = false
+                        }
+                    }
                 SecureField("Password", text: $appPreference.webdavPassword)
 
                 HStack {
                     Button(appPreference.webdavHasStoredCredential ? "Update Password in Keychain" : "Save Password to Keychain") {
-                        appPreference.webdavHasStoredCredential = !appPreference.webdavPassword.isEmpty
+                        appPreference.storeWebDAVPasswordInKeychain()
+                        webdavConnectionStatus = "Password saved to Keychain."
                     }
                     .disabled(appPreference.webdavPassword.isEmpty)
+
+                    Button("Remove Keychain Password") {
+                        appPreference.removeWebDAVPasswordFromKeychain()
+                        appPreference.webdavPassword = ""
+                        webdavConnectionStatus = "Stored password removed from Keychain."
+                    }
+                    .disabled(!appPreference.webdavHasStoredCredential)
 
                     Spacer()
 
@@ -319,6 +336,14 @@ struct GeneralSettingsView: View {
                 try await PersistenceController.shared.refreshIndices()
             } label: {
                 Text(localizable: .settingsButtonRefreshSpotlightIndices)
+            }
+        }
+        .onAppear {
+            if let password = appPreference.loadWebDAVPasswordFromKeychain() {
+                appPreference.webdavPassword = password
+                appPreference.webdavHasStoredCredential = true
+            } else {
+                appPreference.webdavHasStoredCredential = false
             }
         }
     }

@@ -9,6 +9,7 @@ import SwiftUI
 import WebKit
 import Combine
 import Logging
+import Security
 
 import ChocofordUI
 import UniformTypeIdentifiers
@@ -162,13 +163,17 @@ final class AppPreference: ObservableObject {
     @AppStorage("customDrawingSettingsData") private var customDrawingSettingsData: Data = Data()
 
     // Sync provider
-    @AppStorage("SyncProvider") var syncProvider: SyncProvider = .iCloud
+    @AppStorage("SyncProvider") var syncProvider: SyncProvider = .iCloud {
+        didSet {
+            syncCloudSyncPreference()
+        }
+    }
     @AppStorage("WebDAVServerURL") var webdavServerURL: String = ""
     @AppStorage("WebDAVBasePath") var webdavBasePath: String = ""
     @AppStorage("WebDAVUsername") var webdavUsername: String = ""
-    @AppStorage("WebDAVPassword") var webdavPassword: String = ""
     @AppStorage("WebDAVHasStoredCredential") var webdavHasStoredCredential: Bool = false
     @AppStorage("WebDAVLastConnected") var webdavLastConnected: Bool = false
+    @Published var webdavPassword: String = ""
     @Published private(set) var isICloudAvailable: Bool = AppPreference.computeICloudAvailability()
 
     private var iCloudAvailabilityObserver: NSObjectProtocol?
@@ -190,6 +195,9 @@ final class AppPreference: ObservableObject {
     }
 
     init() {
+        webdavHasStoredCredential = loadWebDAVPasswordFromKeychain() != nil
+        syncCloudSyncPreference()
+
         iCloudAvailabilityObserver = NotificationCenter.default.addObserver(
             forName: NSNotification.Name.NSUbiquityIdentityDidChange,
             object: nil,
@@ -198,6 +206,63 @@ final class AppPreference: ObservableObject {
             self?.refreshICloudAvailability()
         }
         refreshICloudAvailability()
+    }
+
+    func storeWebDAVPasswordInKeychain() {
+        guard !webdavPassword.isEmpty else {
+            removeWebDAVPasswordFromKeychain()
+            return
+        }
+
+        let account = webdavUsername.isEmpty ? "default" : webdavUsername
+        let encodedPassword = Data(webdavPassword.utf8)
+        let query = webDAVPasswordQuery(account: account)
+        let attributes: [String: Any] = [kSecValueData as String: encodedPassword]
+        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+
+        if status == errSecItemNotFound {
+            var insertQuery = query
+            insertQuery[kSecValueData as String] = encodedPassword
+            let insertStatus = SecItemAdd(insertQuery as CFDictionary, nil)
+            webdavHasStoredCredential = insertStatus == errSecSuccess
+            return
+        }
+
+        webdavHasStoredCredential = status == errSecSuccess
+    }
+
+    func loadWebDAVPasswordFromKeychain() -> String? {
+        let account = webdavUsername.isEmpty ? "default" : webdavUsername
+        var query = webDAVPasswordQuery(account: account)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess,
+              let data = item as? Data,
+              let password = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return password
+    }
+
+    func removeWebDAVPasswordFromKeychain() {
+        let account = webdavUsername.isEmpty ? "default" : webdavUsername
+        _ = SecItemDelete(webDAVPasswordQuery(account: account) as CFDictionary)
+        webdavHasStoredCredential = false
+    }
+
+    private func syncCloudSyncPreference() {
+        UserDefaults.standard.set(syncProvider != .iCloud, forKey: "DisableCloudSync")
+    }
+
+    private func webDAVPasswordQuery(account: String) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "com.chocoford.excalidraw.webdav",
+            kSecAttrAccount as String: account
+        ]
     }
 
     deinit {
