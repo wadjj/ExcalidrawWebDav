@@ -14,10 +14,12 @@ struct OrphanCleaner {
     private let logger = Logger(label: "OrphanCleaner")
     private let localManager: LocalStorageManager
     private let iCloudManager: iCloudDriveFileManager
+    private let recoveryStore: SyncRecoveryStore
 
-    init(localManager: LocalStorageManager, iCloudManager: iCloudDriveFileManager) {
+    init(localManager: LocalStorageManager, iCloudManager: iCloudDriveFileManager, recoveryStore: SyncRecoveryStore) {
         self.localManager = localManager
         self.iCloudManager = iCloudManager
+        self.recoveryStore = recoveryStore
     }
 
     // MARK: - Cleanup Operations
@@ -30,14 +32,20 @@ struct OrphanCleaner {
         let validFileIDs = await getValidFileIDs()
         var deletedCount = 0
 
-        // Clean up local orphaned files
-        for file in localFiles {
+        let localOrphans = localFiles.filter { file in
             let validIDs = getValidIDs(for: file.contentType, from: validFileIDs)
-            if !validIDs.contains(file.fileID) {
-                logger.info("Removing orphaned local file: \(file.relativePath)")
-                try? await localManager.deleteContent(relativePath: file.relativePath)
-                deletedCount += 1
-            }
+            return !validIDs.contains(file.fileID)
+        }
+
+        if localOrphans.count > 1 {
+            await recoveryStore.createBulkDeleteCheckpoint(files: localOrphans, reason: "orphan-cleanup")
+        }
+
+        // Clean up local orphaned files
+        for file in localOrphans {
+            logger.info("Removing orphaned local file: \(file.relativePath)")
+            try? await localManager.deleteContent(relativePath: file.relativePath)
+            deletedCount += 1
         }
 
         // Clean up iCloud orphaned files

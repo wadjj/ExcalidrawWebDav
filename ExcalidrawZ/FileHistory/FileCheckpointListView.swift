@@ -88,6 +88,7 @@ struct FileHistoryButton: View {
 }
 
 struct FileCheckpointListView<Checkpoint: FileCheckpointRepresentable>: View {
+    @Environment(\.alertToast) private var alertToast
     @Environment(\.containerHorizontalSizeClass) private var containerHorizontalSizeClass
     @Environment(\.containerVerticalSizeClass) private var containerVerticalSizeClass
     @Environment(\.dismiss) private var dismiss
@@ -117,6 +118,8 @@ struct FileCheckpointListView<Checkpoint: FileCheckpointRepresentable>: View {
     }
     
     @State private var selection: Checkpoint?
+    @State private var recoveryCheckpoints: [SyncRecoveryCheckpointSummary] = []
+    @State private var operationJournal: [SyncOperationJournalEntry] = []
     
     var body: some View {
         content()
@@ -138,6 +141,7 @@ struct FileCheckpointListView<Checkpoint: FileCheckpointRepresentable>: View {
     private func content_iOS() -> some View {
         NavigationStack {
             List(selection: $selection) {
+                syncRecoverySection
                 ForEach(fileCheckpoints) { checkpoint in
                     FileCheckpointRowView(checkpoint: checkpoint)
                 }
@@ -163,6 +167,7 @@ struct FileCheckpointListView<Checkpoint: FileCheckpointRepresentable>: View {
         
         if #available(macOS 26.0, *) {
             List {
+                syncRecoverySection
                 ForEach(fileCheckpoints, id: \.objectID) { checkpoint in
                     FileCheckpointRowView(checkpoint: checkpoint)
                 }
@@ -170,6 +175,7 @@ struct FileCheckpointListView<Checkpoint: FileCheckpointRepresentable>: View {
             .scrollContentBackground(.hidden)
         } else if #available(macOS 13.0, *) {
             List {
+                syncRecoverySection
                 ForEach(fileCheckpoints) { checkpoint in
                     FileCheckpointRowView(checkpoint: checkpoint)
                 }
@@ -177,6 +183,7 @@ struct FileCheckpointListView<Checkpoint: FileCheckpointRepresentable>: View {
             .scrollContentBackground(.hidden)
         } else {
             List {
+                syncRecoverySection
                 ForEach(fileCheckpoints,  id: \.objectID) { checkpoint in
                     FileCheckpointRowView(checkpoint: checkpoint)
                 }
@@ -184,6 +191,41 @@ struct FileCheckpointListView<Checkpoint: FileCheckpointRepresentable>: View {
         }
     }
 #endif
+
+    @ViewBuilder
+    private var syncRecoverySection: some View {
+        Section("Sync Recovery") {
+            Button("Restore from pre-sync snapshot") {
+                Task {
+                    do {
+                        let restored = try await FileStorageManager.shared.restoreFromPreSyncSnapshot()
+                        await loadRecoveryData()
+                        let _ = restored
+                    } catch {
+                        await MainActor.run { alertToast(error) }
+                    }
+                }
+            }
+
+            if !recoveryCheckpoints.isEmpty {
+                Text("Recovery checkpoints: \(recoveryCheckpoints.count)")
+                    .font(.footnote)
+            }
+            if let lastJournal = operationJournal.first {
+                Text("Last sync action: \(lastJournal.action) · \(lastJournal.timestamp.formatted())")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .task {
+            await loadRecoveryData()
+        }
+    }
+
+    private func loadRecoveryData() async {
+        recoveryCheckpoints = await FileStorageManager.shared.listRecoveryCheckpoints()
+        operationJournal = await FileStorageManager.shared.listSyncOperationJournal()
+    }
 
 }
 
