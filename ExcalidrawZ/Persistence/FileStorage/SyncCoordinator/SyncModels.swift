@@ -45,6 +45,7 @@ struct SyncEvent: Codable, Identifiable {
     let timestamp: Date
     let retryCount: Int
     let priority: SyncPriority
+    let nextAttemptAt: Date?
 
     init(
         fileID: String,
@@ -52,7 +53,8 @@ struct SyncEvent: Codable, Identifiable {
         operation: SyncOperation,
         timestamp: Date = Date(),
         retryCount: Int = 0,
-        priority: SyncPriority = .normal
+        priority: SyncPriority = .normal,
+        nextAttemptAt: Date? = nil
     ) {
         self.id = UUID()
         self.fileID = fileID
@@ -61,6 +63,7 @@ struct SyncEvent: Codable, Identifiable {
         self.timestamp = timestamp
         self.retryCount = retryCount
         self.priority = priority
+        self.nextAttemptAt = nextAttemptAt
     }
 
     /// Create a new event with incremented retry count
@@ -71,8 +74,64 @@ struct SyncEvent: Codable, Identifiable {
             operation: operation,
             timestamp: timestamp,
             retryCount: retryCount + 1,
-            priority: priority
+            priority: priority,
+            nextAttemptAt: nil
         )
+    }
+
+    /// Create a retry event with explicit backoff delay
+    func withRetryDelay(_ delay: TimeInterval) -> SyncEvent {
+        SyncEvent(
+            fileID: fileID,
+            relativePath: relativePath,
+            operation: operation,
+            timestamp: timestamp,
+            retryCount: retryCount + 1,
+            priority: priority,
+            nextAttemptAt: Date().addingTimeInterval(delay)
+        )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, fileID, relativePath, operation, timestamp, retryCount, priority, nextAttemptAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        fileID = try container.decode(String.self, forKey: .fileID)
+        relativePath = try container.decode(String.self, forKey: .relativePath)
+        operation = try container.decode(SyncOperation.self, forKey: .operation)
+        timestamp = try container.decode(Date.self, forKey: .timestamp)
+        retryCount = try container.decodeIfPresent(Int.self, forKey: .retryCount) ?? 0
+        priority = try container.decodeIfPresent(SyncPriority.self, forKey: .priority) ?? .normal
+        nextAttemptAt = try container.decodeIfPresent(Date.self, forKey: .nextAttemptAt)
+    }
+}
+
+enum SyncModePreset: Int {
+    case balanced = 0
+    case lowImpact = 1
+
+    var maxConcurrentRequests: Int {
+        switch self {
+            case .balanced: return 3
+            case .lowImpact: return 2
+        }
+    }
+
+    var debounceInterval: TimeInterval {
+        switch self {
+            case .balanced: return 0.5
+            case .lowImpact: return 1.2
+        }
+    }
+
+    var maxBatchWait: TimeInterval {
+        switch self {
+            case .balanced: return 3.0
+            case .lowImpact: return 6.0
+        }
     }
 }
 

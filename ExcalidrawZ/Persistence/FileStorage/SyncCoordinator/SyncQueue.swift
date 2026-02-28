@@ -30,6 +30,12 @@ actor SyncQueue {
     /// Enqueue a sync event with priority-based insertion
     /// High priority events are inserted at the front, normal priority at the back
     func enqueue(_ event: SyncEvent) {
+        let originalCount = queue.count
+        queue.removeAll { queuedEvent in
+            queuedEvent.relativePath == event.relativePath
+        }
+        let droppedCount = originalCount - queue.count
+
         if event.priority == .high {
             // High priority: Insert at the beginning (or after other high priority items)
             // Find the first normal priority item
@@ -44,6 +50,24 @@ actor SyncQueue {
             // Normal priority: Append to end
             queue.append(event)
             logger.info("Queued sync operation: \(event.operation) for \(event.relativePath)")
+        }
+
+        if droppedCount > 0 {
+            logger.info("Coalesced \(droppedCount) superseded operations for \(event.relativePath)")
+        }
+        saveQueue()
+    }
+
+    /// Requeue an existing event without coalescing (used for delayed retries)
+    func requeue(_ event: SyncEvent) {
+        if event.priority == .high {
+            if let firstNormalIndex = queue.firstIndex(where: { $0.priority == .normal }) {
+                queue.insert(event, at: firstNormalIndex)
+            } else {
+                queue.append(event)
+            }
+        } else {
+            queue.append(event)
         }
         saveQueue()
     }
