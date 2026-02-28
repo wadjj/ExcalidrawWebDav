@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:">
+  <d:response>
+    <d:href>/remote.php/dav/files/demo/Documents/</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:resourcetype><d:collection/></d:resourcetype>
+      </d:prop>
+    </d:propstat>
+  </d:response>
+  <d:response>
+    <d:href>/remote.php/dav/files/demo/Documents/file1.excalidraw</d:href>
+    <d:propstat>
+      <d:prop>
+        <d:getetag>"abc123"</d:getetag>
+        <d:getcontentlength>512</d:getcontentlength>
+        <d:getcontenttype>application/json</d:getcontenttype>
+      </d:prop>
+    </d:propstat>
+  </d:response>
+</d:multistatus>
