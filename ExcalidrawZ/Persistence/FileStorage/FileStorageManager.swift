@@ -357,7 +357,7 @@ actor FileStorageManager {
         let syncEvent = SyncEvent(
             fileID: mediaID,
             relativePath: relativePath,
-            operation: .uploadToCloud,
+            operation: .uploadToRemote,
             timestamp: Date()
         )
         Task {
