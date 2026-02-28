@@ -379,6 +379,38 @@ actor SyncCoordinator {
     /// 4. Schedule orphan cleanup (filesystem has but CoreData doesn't)
     /// 5. If many files are missing (possible first sync), trigger container download and retry once
     func performDiffScan(allowRetry: Bool = true) async throws {
+        let result = try await buildDiffScanResult(allowRetry: allowRetry)
+
+        // Step 5: Schedule orphan cleanup (delayed to avoid first-sync data loss)
+        scheduleOrphanCleanup()
+
+        logger.info("DiffScan complete: found \(result.operations.count) sync operations")
+
+        // Queue all sync operations without auto-processing
+        for operation in result.operations {
+            await enqueue(operation, autoProcess: false)
+        }
+
+        // Process queue once after all operations are queued
+        await processQueue()
+    }
+
+    func performDiffScanDryRun() async throws -> SyncDryRunReport {
+        let result = try await buildDiffScanResult(allowRetry: false)
+        return summarizeOperations(operations: result.operations, missingCount: result.missingCount)
+    }
+
+    private func summarizeOperations(operations: [SyncEvent], missingCount: Int) -> SyncDryRunReport {
+        SyncDryRunReport(
+            uploadCount: operations.filter { $0.operation == .uploadToCloud }.count,
+            downloadCount: operations.filter { $0.operation == .downloadFromCloud }.count,
+            deleteFromCloudCount: operations.filter { $0.operation == .deleteFromCloud }.count,
+            deleteFromLocalCount: operations.filter { $0.operation == .deleteFromLocal }.count,
+            missingCount: missingCount
+        )
+    }
+
+    private func buildDiffScanResult(allowRetry: Bool) async throws -> (operations: [SyncEvent], missingCount: Int) {
         logger.info("Starting DiffScan...")
         if allowRetry {
             diffScanRetryCount = 0
@@ -533,19 +565,8 @@ actor SyncCoordinator {
                 diffScanRetryCount = 0
             }
         }
-        
-        // Step 5: Schedule orphan cleanup (delayed to avoid first-sync data loss)
-        scheduleOrphanCleanup()
-        
-        logger.info("DiffScan complete: found \(syncOperations.count) sync operations")
 
-        // Queue all sync operations without auto-processing
-        for operation in syncOperations {
-            await enqueue(operation, autoProcess: false)
-        }
-
-        // Process queue once after all operations are queued
-        await processQueue()
+        return (syncOperations, missingCount)
     }
 
     private func scheduleOrphanCleanup() {

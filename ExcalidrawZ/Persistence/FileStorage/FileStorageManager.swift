@@ -389,6 +389,11 @@ actor FileStorageManager {
         return await iCloudManager.getCurrentStatus()
     }
 
+    /// Run an immediate iCloud availability check.
+    func checkICloudAvailabilityNow() async -> ICloudAvailabilityStatus {
+        return await iCloudManager.checkICloudAvailability()
+    }
+
     /// Get number of pending sync operations
     func getPendingSyncCount() async -> Int {
         guard let syncCoordinator = syncCoordinator else { return 0 }
@@ -407,6 +412,16 @@ actor FileStorageManager {
         logger.info("Starting startup sync...")
         try await syncCoordinator.performDiffScan()
         logger.info("Startup sync completed")
+    }
+
+    /// Run a non-destructive startup scan and return operation counts.
+    func performStartupSyncDryRun() async throws -> SyncDryRunReport {
+        guard let syncCoordinator = syncCoordinator else {
+            logger.warning("performStartupSyncDryRun called before sync enabled, returning empty report")
+            return SyncDryRunReport(uploadCount: 0, downloadCount: 0, deleteFromCloudCount: 0, deleteFromLocalCount: 0, missingCount: 0)
+        }
+        logger.info("Starting startup sync dry run...")
+        return try await syncCoordinator.performDiffScanDryRun()
     }
 
     /// Manually trigger sync queue processing
