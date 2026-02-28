@@ -1,0 +1,46 @@
+name: Apple CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - work
+  workflow_dispatch:
+
+jobs:
+  build-and-test-ios:
+    name: Build & Test (iOS Simulator)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Resolve Swift Package dependencies
+        run: |
+          xcodebuild \
+            -resolvePackageDependencies \
+            -project ExcalidrawZ.xcodeproj \
+            -scheme "ExcalidrawZ"
+
+      - name: Build
+        run: |
+          xcodebuild \
+            -project ExcalidrawZ.xcodeproj \
+            -scheme "ExcalidrawZ" \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,name=iPhone 16" \
+            build
+
+      - name: Test
+        run: |
+          xcodebuild \
+            -project ExcalidrawZ.xcodeproj \
+            -scheme "ExcalidrawZ" \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,name=iPhone 16" \
+            test
