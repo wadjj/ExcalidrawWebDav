@@ -23,6 +23,8 @@ struct BackupsSettingsView: View {
     @State private var selectedFile: URL?
     
     @State private var backupToBeDeleted: URL?
+    @State private var recoveryCheckpoints: [SyncRecoveryCheckpointSummary] = []
+    @State private var operationJournal: [SyncOperationJournalEntry] = []
     
     enum Route: Hashable {
         case dateList
@@ -95,6 +97,7 @@ struct BackupsSettingsView: View {
         }
         .onAppear {
             loadBackups()
+            Task { await loadSyncRecoveryData() }
         }
     }
     
@@ -131,6 +134,9 @@ struct BackupsSettingsView: View {
                         selectedBackup = nil
                     }
             }
+
+            syncRecoveryPanel
+                .padding(.top, 12)
         }
     }
     
@@ -156,6 +162,8 @@ struct BackupsSettingsView: View {
                     }
                 }
             }
+            syncRecoveryPanel
+                .padding(.top, 12)
         }
         .frame(maxWidth: 400)
     }
@@ -197,6 +205,43 @@ struct BackupsSettingsView: View {
         }
     }
     
+
+    @ViewBuilder
+    private var syncRecoveryPanel: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Sync recovery")
+                .font(.headline)
+
+            Button("Restore from pre-sync snapshot") {
+                Task {
+                    do {
+                        _ = try await FileStorageManager.shared.restoreFromPreSyncSnapshot()
+                        await loadSyncRecoveryData()
+                    } catch {
+                        alertToast(error)
+                    }
+                }
+            }
+
+            Text("Recovery checkpoints: \(recoveryCheckpoints.count)")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+
+            if let latest = operationJournal.first {
+                Text("Last sync action: \(latest.action) · \(latest.timestamp.formatted())")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func loadSyncRecoveryData() async {
+        recoveryCheckpoints = await FileStorageManager.shared.listRecoveryCheckpoints()
+        operationJournal = await FileStorageManager.shared.listSyncOperationJournal()
+    }
+
     private func loadBackups() {
         do {
             let backupsDir = try getBackupsDir()

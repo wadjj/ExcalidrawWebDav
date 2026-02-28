@@ -414,6 +414,30 @@ actor FileStorageManager {
         await syncCoordinator?.processQueue()
     }
 
+    func listRecoveryCheckpoints() async -> [SyncRecoveryCheckpointSummary] {
+        guard let syncCoordinator else { return [] }
+        return await syncCoordinator.listRecoveryCheckpoints()
+    }
+
+    func listSyncOperationJournal() async -> [SyncOperationJournalEntry] {
+        guard let syncCoordinator else { return [] }
+        return await syncCoordinator.listOperationJournal()
+    }
+
+    func restoreFromPreSyncSnapshot() async throws -> Int {
+        guard let syncCoordinator else { return 0 }
+        let restored = try await syncCoordinator.restoreLatestPreSyncSnapshot()
+        await syncCoordinator.processQueue()
+        return restored
+    }
+
+    func restoreRecoveryCheckpoint(id: UUID) async throws -> Int {
+        guard let syncCoordinator else { return 0 }
+        let restored = try await syncCoordinator.restoreRecoveryCheckpoint(id: id)
+        await syncCoordinator.processQueue()
+        return restored
+    }
+
     // MARK: - File Status Query (Public API)
 
     /// Check if a file is marked as missing (3+ load failures)

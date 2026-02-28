@@ -22,6 +22,7 @@ actor SyncCoordinator {
     private let syncQueue: SyncQueue
     private let fileEnumerator: FileEnumerator
     private let orphanCleaner: OrphanCleaner
+    private let recoveryStore: SyncRecoveryStore
     
     // Sync state
     private var isSyncing = false
@@ -52,7 +53,8 @@ actor SyncCoordinator {
         // Initialize components
         self.syncQueue = SyncQueue()
         self.fileEnumerator = FileEnumerator(localManager: localManager, iCloudManager: iCloudManager)
-        self.orphanCleaner = OrphanCleaner(localManager: localManager, iCloudManager: iCloudManager)
+        self.recoveryStore = SyncRecoveryStore(localManager: localManager)
+        self.orphanCleaner = OrphanCleaner(localManager: localManager, iCloudManager: iCloudManager, recoveryStore: recoveryStore)
         
         // Start monitoring and process queued operations
         Task {
@@ -135,6 +137,7 @@ actor SyncCoordinator {
     /// - Parameter autoProcess: If true, automatically schedules queue processing (default: true)
     func enqueue(_ event: SyncEvent, autoProcess: Bool = true) async {
         await syncQueue.enqueue(event)
+        await recoveryStore.appendJournal(.init(action: "enqueue", fileID: event.fileID, relativePath: event.relativePath, note: event.operation.description))
 
         // Update UI status - mark as queued
         let queuedOp: FileSyncStatus.QueuedOperation = switch event.operation {
@@ -289,21 +292,31 @@ actor SyncCoordinator {
                     throw FileStorageError.storageUnavailable
                 }
                 try await uploadToCloud(event: event)
+                await recoveryStore.appendJournal(.init(action: "upload", fileID: event.fileID, relativePath: event.relativePath, note: "Uploaded to cloud"))
                 
             case .downloadFromCloud:
                 guard status.isAvailable else {
                     throw FileStorageError.storageUnavailable
                 }
+                if let existingLocal = try? await existingLocalState(for: event) {
+                    await recoveryStore.createRecoveryCheckpoint(for: existingLocal, reason: "remote-overwrite")
+                }
                 try await downloadFromCloud(event: event)
+                await recoveryStore.appendJournal(.init(action: "download", fileID: event.fileID, relativePath: event.relativePath, note: "Downloaded from cloud"))
                 
             case .deleteFromCloud:
                 guard status.isAvailable else {
                     throw FileStorageError.storageUnavailable
                 }
                 try await iCloudManager.deleteContent(relativePath: event.relativePath)
+                await recoveryStore.appendJournal(.init(action: "delete_cloud", fileID: event.fileID, relativePath: event.relativePath, note: "Deleted in cloud"))
                 
             case .deleteFromLocal:
+                if let existingLocal = try? await existingLocalState(for: event) {
+                    await recoveryStore.createRecoveryCheckpoint(for: existingLocal, reason: "bulk-delete")
+                }
                 try await localManager.deleteContent(relativePath: event.relativePath)
+                await recoveryStore.appendJournal(.init(action: "delete_local", fileID: event.fileID, relativePath: event.relativePath, note: "Deleted locally"))
         }
     }
     
@@ -391,6 +404,7 @@ actor SyncCoordinator {
         // Step 1: Get all files that should exist from CoreData
         let expectedFiles = await fileEnumerator.enumerateExpectedFiles()
         logger.info("Expected \(expectedFiles.count) files from CoreData")
+        await recoveryStore.ensurePreSyncSnapshotIfNeeded(expectedFiles: expectedFiles, trigger: "initial-sync")
         
         // Step 2: Enumerate actual files in local and iCloud
         let localFiles = try await fileEnumerator.enumerateLocalFiles()
@@ -694,6 +708,29 @@ actor SyncCoordinator {
         return hasNewerVersion
     }
     
+    func listRecoveryCheckpoints() async -> [SyncRecoveryCheckpointSummary] {
+        await recoveryStore.listCheckpoints()
+    }
+
+    func listOperationJournal() async -> [SyncOperationJournalEntry] {
+        await recoveryStore.listJournal()
+    }
+
+    func restoreLatestPreSyncSnapshot() async throws -> Int {
+        try await recoveryStore.restoreLatestPreSyncSnapshot()
+    }
+
+    func restoreRecoveryCheckpoint(id: UUID) async throws -> Int {
+        try await recoveryStore.restoreCheckpoint(id: id)
+    }
+
+    private func existingLocalState(for event: SyncEvent) async throws -> SyncFileState? {
+        guard await localManager.fileExists(relativePath: event.relativePath) else { return nil }
+        guard let contentType = FileStorageContentType.from(relativePath: event.relativePath) else { return nil }
+        let metadata = try await localManager.getFileMetadata(relativePath: event.relativePath)
+        return SyncFileState(fileID: event.fileID, relativePath: event.relativePath, contentType: contentType, modifiedAt: metadata.modifiedAt, size: metadata.size)
+    }
+
     /// Load content with iCloud version check
     func loadContentWithSync(relativePath: String, fileID: String) async throws -> Data {
         // Check if iCloud has newer version
