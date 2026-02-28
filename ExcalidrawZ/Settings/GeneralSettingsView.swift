@@ -30,6 +30,7 @@ struct GeneralSettingsView: View {
     @AppStorage("DisableCloudSync") var isICloudDisabled: Bool = false
     
     @AppStorage("FolderStructureStyle") var folderStructStyle: FolderStructureStyle = .disclosureGroup
+    @AppStorage("SyncModePreset") var syncModePresetRawValue: Int = SyncModePreset.balanced.rawValue
     
     @State private var isDisclosureGroupUnspportedAlertPresented = false
     struct DisclosureGroupUnspportedError: LocalizedError {
@@ -240,6 +241,21 @@ struct GeneralSettingsView: View {
         }
 #endif // os(macOS) && !APP_STORE
         
+        Section {
+            HStack {
+                Text("Sync mode")
+                Spacer()
+                Picker("Sync mode", selection: $syncModePresetRawValue) {
+                    Text("Balanced").tag(SyncModePreset.balanced.rawValue)
+                    Text("Low-impact (NAS)").tag(SyncModePreset.lowImpact.rawValue)
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 280)
+            }
+        } footer: {
+            Text("Low-impact lowers parallel sync requests and increases batching for unreliable NAS or remote storage.")
+        }
+
         Section {
             Toggle(
                 .localizable(.settingsICloudToggleDisable),

@@ -28,9 +28,10 @@ actor SyncCoordinator {
     private var lastKnownICloudAvailability: Bool? = nil
     private var iCloudStatusSubscription: AnyCancellable?
     
-    // Debounce state
+    // Batch window state
     private var pendingProcessTask: Task<Void, Never>?
-    private let debounceInterval: TimeInterval = 0.5  // 500ms debounce
+    private var batchWindowStart: Date?
+
 
     // DiffScan retry state
     private var diffScanRetryTask: Task<Void, Never>?
@@ -41,7 +42,10 @@ actor SyncCoordinator {
     private let orphanCleanupDelay: TimeInterval = 60
     
     // Constants
-    private let maxRetryCount = 3
+    private let maxRetryCount = 5
+    private let maxRetryAge: TimeInterval = 60 * 10
+    private let syncModePresetKey = "SyncModePreset"
+
     
     // MARK: - Initialization
     
@@ -127,41 +131,56 @@ actor SyncCoordinator {
     func getQueueCount() async -> Int {
         return await syncQueue.count()
     }
+
+    private func currentSyncPreset() -> SyncModePreset {
+        let rawValue = UserDefaults.standard.integer(forKey: syncModePresetKey)
+        return SyncModePreset(rawValue: rawValue) ?? .balanced
+    }
+
+    private func queueOperationDescription(for operation: SyncOperation) -> FileSyncStatus.QueuedOperation {
+        switch operation {
+            case .uploadToCloud: return .upload
+            case .downloadFromCloud: return .download
+            case .deleteFromCloud, .deleteFromLocal: return .delete
+        }
+    }
     
     // MARK: - Queue Management
     
     /// Add event to queue and persist
-    /// Automatically triggers processing after a short debounce interval
+    /// Automatically triggers processing with a short batch debounce and max wait cap.
     /// - Parameter autoProcess: If true, automatically schedules queue processing (default: true)
     func enqueue(_ event: SyncEvent, autoProcess: Bool = true) async {
         await syncQueue.enqueue(event)
 
-        // Update UI status - mark as queued
-        let queuedOp: FileSyncStatus.QueuedOperation = switch event.operation {
-            case .uploadToCloud: .upload
-            case .downloadFromCloud: .download
-            case .deleteFromCloud, .deleteFromLocal: .delete
-        }
         Task { @MainActor in
-            FileStatusService.shared.markSyncQueued(fileID: event.fileID, operation: queuedOp)
+            FileStatusService.shared.markSyncQueued(fileID: event.fileID, operation: queueOperationDescription(for: event.operation))
         }
 
         guard autoProcess else { return }
+        await scheduleQueueProcessing()
+    }
 
-        // Cancel pending task if exists
+    private func scheduleQueueProcessing(after delay: TimeInterval? = nil) async {
+        let preset = currentSyncPreset()
+        let now = Date()
+        if batchWindowStart == nil {
+            batchWindowStart = now
+        }
+
+        let batchStart = batchWindowStart ?? now
+        let debounceTarget = now.addingTimeInterval(delay ?? preset.debounceInterval)
+        let maxWaitTarget = batchStart.addingTimeInterval(preset.maxBatchWait)
+        let runAt = min(debounceTarget, maxWaitTarget)
+        let nanoseconds = max(0, UInt64(runAt.timeIntervalSinceNow * 1_000_000_000))
+
         pendingProcessTask?.cancel()
-
-        // Schedule new processing task with debounce
         pendingProcessTask = Task { [weak self] in
             guard let self = self else { return }
-
-            // Wait for debounce interval
-            try? await Task.sleep(nanoseconds: UInt64(self.debounceInterval * 1_000_000_000))
-
-            // Check if task was cancelled during sleep
+            if nanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: nanoseconds)
+            }
             guard !Task.isCancelled else { return }
-
-            // Process the queue
             await self.processQueue()
         }
     }
@@ -211,102 +230,148 @@ actor SyncCoordinator {
     
     // MARK: - Queue Processing
     
-    /// Process all queued sync operations
-    /// Uses dynamic dequeue to allow high-priority tasks to jump the queue
+    /// Process queued sync operations using backend-specific concurrency limits.
     func processQueue() async {
         guard !isSyncing else { return }
-        
+
         let initialCount = await syncQueue.count()
         guard initialCount > 0 else { return }
-        
+
         isSyncing = true
-        
-        logger.info("Processing \(initialCount) queued sync operations")
-        
+        let preset = currentSyncPreset()
+        await FileStatusService.shared.updateOverallProgress(current: 0, total: initialCount)
+
         var processedCount = 0
         var failedCount = 0
-        
-        // Initialize overall progress tracking
-        await FileStatusService.shared.updateOverallProgress(current: 0, total: initialCount)
-        
-        // Process operations one by one from the queue
-        // This allows high-priority tasks added during processing to be processed immediately
-        while let event = await syncQueue.dequeueFirst() {
-            processedCount += 1
-            logger.info("Processing operation \(processedCount): \(event.operation) for \(event.relativePath)")
-            
-            // Mark as syncing
-            let syncOp: FileSyncStatus.QueuedOperation = switch event.operation {
-                case .uploadToCloud: .upload
-                case .downloadFromCloud: .download
-                case .deleteFromCloud, .deleteFromLocal: .delete
-            }
-            await FileStatusService.shared.markSyncInProgress(fileID: event.fileID, operation: syncOp)
-            
-            do {
-                try await executeSyncOperation(event)
-                // Success - mark as completed in UI
-                await FileStatusService.shared.markSyncCompleted(fileID: event.fileID)
-                
-                // Update overall progress
-                await FileStatusService.shared.updateOverallProgress(current: processedCount, total: initialCount)
-            } catch {
-                logger.error("Failed to execute sync operation: \(error.localizedDescription)")
-                
-                // Check retry count
-                if event.retryCount < maxRetryCount {
-                    // Re-queue with incremented retry count
-                    let retryEvent = event.withIncrementedRetry()
-                    // Use enqueue() to ensure proper status updates, but don't auto-process
-                    // since we're already in processQueue
-                    await enqueue(retryEvent, autoProcess: false)
-                    failedCount += 1
-                } else {
-                    logger.warning("Max retry count reached for sync operation, dropping")
-                    
-                    // Mark as failed in UI
-                    await FileStatusService.shared.markSyncFailed(fileID: event.fileID, error: error.localizedDescription)
+
+        while true {
+            var batch: [SyncEvent] = []
+            var earliestDeferredDelay: TimeInterval?
+
+            for _ in 0 ..< preset.maxConcurrentRequests {
+                guard let event = await syncQueue.dequeueFirst() else { break }
+                if let nextAttemptAt = event.nextAttemptAt, nextAttemptAt > Date() {
+                    let delay = nextAttemptAt.timeIntervalSinceNow
+                    earliestDeferredDelay = min(earliestDeferredDelay ?? delay, delay)
+                    await syncQueue.requeue(event)
+                    continue
                 }
-                
-                // Update overall progress even on failure
+                batch.append(event)
+            }
+
+            guard !batch.isEmpty else {
+                if let earliestDeferredDelay, earliestDeferredDelay > 0 {
+                    await scheduleQueueProcessing(after: earliestDeferredDelay)
+                }
+                break
+            }
+
+            logger.info("Processing sync batch size=\(batch.count), mode=\(String(describing: preset))")
+            for event in batch {
+                await FileStatusService.shared.markSyncInProgress(fileID: event.fileID, operation: queueOperationDescription(for: event.operation))
+            }
+
+            let localManager = self.localManager
+            let iCloudManager = self.iCloudManager
+            let results = await withTaskGroup(of: (SyncEvent, Error?).self, returning: [(SyncEvent, Error?)].self) { group in
+                for event in batch {
+                    group.addTask {
+                        do {
+                            try await Self.executeSyncOperation(event, localManager: localManager, iCloudManager: iCloudManager)
+                            return (event, nil)
+                        } catch {
+                            return (event, error)
+                        }
+                    }
+                }
+
+                var values: [(SyncEvent, Error?)] = []
+                for await value in group {
+                    values.append(value)
+                }
+                return values
+            }
+
+            for (event, maybeError) in results {
+                processedCount += 1
+
+                if let error = maybeError {
+                    if shouldRetry(event: event, error: error) {
+                        let retryDelay = backoffDelay(for: event, error: error)
+                        let retryEvent = event.withRetryDelay(retryDelay)
+                        await syncQueue.requeue(retryEvent)
+                        failedCount += 1
+                        await scheduleQueueProcessing(after: retryDelay)
+                    } else {
+                        await FileStatusService.shared.markSyncFailed(fileID: event.fileID, error: error.localizedDescription)
+                    }
+                } else {
+                    await FileStatusService.shared.markSyncCompleted(fileID: event.fileID)
+                }
+
                 await FileStatusService.shared.updateOverallProgress(current: processedCount, total: initialCount)
             }
         }
-        
+
         logger.info("Completed processing: \(processedCount) total, \(failedCount) failed and re-queued")
-        
-        // Release the lock before checking for more work
         isSyncing = false
+        batchWindowStart = nil
     }
-    
+
+    private func shouldRetry(event: SyncEvent, error: Error) -> Bool {
+        guard event.retryCount < maxRetryCount else { return false }
+        guard Date().timeIntervalSince(event.timestamp) <= maxRetryAge else { return false }
+        return shouldUseBackoff(for: error) || error is FileStorageError
+    }
+
+    private func shouldUseBackoff(for error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain { return true }
+        if (500 ... 599).contains(nsError.code) || nsError.code == 429 { return true }
+        let message = (nsError.localizedDescription + " " + nsError.domain).lowercased()
+        return message.contains("429") || message.contains("5xx") || message.contains("timeout") || message.contains("network")
+    }
+
+    private func backoffDelay(for event: SyncEvent, error: Error) -> TimeInterval {
+        let base = shouldUseBackoff(for: error) ? 0.8 : 0.2
+        let exponential = pow(2.0, Double(event.retryCount))
+        let capped = min(20.0, base * exponential)
+        let jitter = Double.random(in: 0 ... 0.35)
+        return capped + jitter
+    }
+
     /// Execute a single sync operation
-    private func executeSyncOperation(_ event: SyncEvent) async throws {
+    private static func executeSyncOperation(
+        _ event: SyncEvent,
+        localManager: LocalStorageManager,
+        iCloudManager: iCloudDriveFileManager
+    ) async throws {
         let status = await iCloudManager.checkICloudAvailability()
-        
+
         switch event.operation {
             case .uploadToCloud:
                 guard status.isAvailable else {
                     throw FileStorageError.storageUnavailable
                 }
-                try await uploadToCloud(event: event)
-                
+                try await uploadToCloud(event: event, localManager: localManager, iCloudManager: iCloudManager)
+
             case .downloadFromCloud:
                 guard status.isAvailable else {
                     throw FileStorageError.storageUnavailable
                 }
-                try await downloadFromCloud(event: event)
-                
+                try await downloadFromCloud(event: event, localManager: localManager, iCloudManager: iCloudManager)
+
             case .deleteFromCloud:
                 guard status.isAvailable else {
                     throw FileStorageError.storageUnavailable
                 }
                 try await iCloudManager.deleteContent(relativePath: event.relativePath)
-                
+
             case .deleteFromLocal:
                 try await localManager.deleteContent(relativePath: event.relativePath)
         }
     }
-    
+
     // MARK: - Sync Operations
     
     /// Upload file to iCloud (force overwrite)
@@ -317,17 +382,18 @@ actor SyncCoordinator {
     ///
     /// Conflict detection should happen at the decision layer (DiffScan, FileState),
     /// not in the execution layer (SyncCoordinator).
-    private func uploadToCloud(event: SyncEvent) async throws {
-        // Load from local storage
+    private static func uploadToCloud(
+        event: SyncEvent,
+        localManager: LocalStorageManager,
+        iCloudManager: iCloudDriveFileManager
+    ) async throws {
         let localData = try await localManager.loadContent(relativePath: event.relativePath)
         let metadata = try await localManager.getFileMetadata(relativePath: event.relativePath)
-        
-        // Determine content type from file extension
+
         guard let contentType = FileStorageContentType.from(relativePath: event.relativePath) else {
             throw FileStorageError.writeFailed("Unknown file type for path: \(event.relativePath)")
         }
-        
-        // Upload to iCloud with conflict resolution
+
         let _ = try await iCloudManager.uploadToICloud(
             fileID: event.fileID,
             localData: localData,
@@ -335,36 +401,33 @@ actor SyncCoordinator {
             type: contentType
         )
     }
-    
+
     /// Download file from iCloud
     ///
     /// Downloads file content from iCloud and saves to local storage.
     /// Note: On iOS, the modificationDate read from iCloud may be cached/stale
     /// if metadata wasn't refreshed before calling this method.
-    private func downloadFromCloud(event: SyncEvent) async throws {
-        // Load from iCloud
+    private static func downloadFromCloud(
+        event: SyncEvent,
+        localManager: LocalStorageManager,
+        iCloudManager: iCloudDriveFileManager
+    ) async throws {
         let iCloudData = try await iCloudManager.loadContent(relativePath: event.relativePath)
-        
-        // Get iCloud metadata
+
         let iCloudURL = try await iCloudManager.getFileURL(relativePath: event.relativePath)
         let attributes = try FileManager.default.attributesOfItem(atPath: iCloudURL.filePath)
         let iCloudModifiedAt = attributes[.modificationDate] as? Date ?? Date()
-        
-        // Determine content type from file extension
+
         guard let contentType = FileStorageContentType.from(relativePath: event.relativePath) else {
-            logger.error("Unknown file type for path: \(event.relativePath), skipping download")
             return
         }
-        
-        // Save to local storage
-        let saveResult = try await localManager.saveContent(
+
+        _ = try await localManager.saveContent(
             iCloudData,
             fileID: event.fileID,
             type: contentType,
             updatedAt: iCloudModifiedAt
         )
-        
-        logger.info("Downloaded from iCloud: \(saveResult)")
     }
     
     // MARK: - DiffScan
@@ -707,7 +770,7 @@ actor SyncCoordinator {
                 operation: .downloadFromCloud,
                 timestamp: Date()
             )
-            try await downloadFromCloud(event: downloadEvent)
+            try await Self.downloadFromCloud(event: downloadEvent, localManager: localManager, iCloudManager: iCloudManager)
         }
         
         // Load from local storage
