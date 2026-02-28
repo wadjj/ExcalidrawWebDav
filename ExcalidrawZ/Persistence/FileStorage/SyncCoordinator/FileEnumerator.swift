@@ -144,17 +144,21 @@ struct FileEnumerator {
                 continue
             }
 
-            // Get download status (macOS only)
-            var downloadStatus: SyncFileState.DownloadStatus? = nil
+            // Get remote sync state (macOS only)
+            var remoteSyncState: SyncFileState.RemoteSyncState? = nil
             #if os(macOS)
             do {
                 let iCloudStatus = try await ICloudStatusChecker.shared.checkStatus(for: fileURL)
-                downloadStatus = mapToDownloadStatus(iCloudStatus)
+                remoteSyncState = mapToRemoteSyncState(iCloudStatus)
             } catch {
                 logger.warning("Failed to check iCloud status for \(fileURL.lastPathComponent): \(error)")
-                // Continue without download status
+                // Continue without remote sync metadata
             }
             #endif
+
+            // Backend-neutral version token (ETag / version ID) is unavailable for iCloud Drive enumeration.
+            // Keep nil and let DiffScan fallback to timestamp + size comparisons.
+            let versionToken: String? = nil
 
             files.append(SyncFileState(
                 fileID: fileID,
@@ -162,21 +166,22 @@ struct FileEnumerator {
                 contentType: contentType,
                 modifiedAt: modifiedAt,
                 size: size,
-                downloadStatus: downloadStatus
+                versionToken: versionToken,
+                remoteSyncState: remoteSyncState
             ))
         }
 
         return files
     }
 
-    /// Map ICloudFileStatus to SyncFileState.DownloadStatus
+    /// Map ICloudFileStatus to SyncFileState.RemoteSyncState
     #if os(macOS)
-    private func mapToDownloadStatus(_ status: ICloudFileStatus) -> SyncFileState.DownloadStatus? {
+    private func mapToRemoteSyncState(_ status: ICloudFileStatus) -> SyncFileState.RemoteSyncState? {
         switch status {
             case .notDownloaded:
                 return .notDownloaded
             case .outdated:
-                return .downloaded
+                return .staleLocalCopy
             case .downloaded:
                 return .current
             default:

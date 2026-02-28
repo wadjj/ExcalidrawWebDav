@@ -9,16 +9,54 @@ import Foundation
 
 /// Sync operation type
 enum SyncOperation: Codable, CustomStringConvertible {
-    case uploadToCloud      // Local → iCloud
-    case downloadFromCloud  // iCloud → Local
-    case deleteFromCloud    // Remove from iCloud
-    case deleteFromLocal    // Remove from local
+    case uploadToRemote      // Local → Remote backend
+    case downloadFromRemote  // Remote backend → Local
+    case deleteFromRemote    // Remove from remote backend
+    case deleteFromLocal     // Remove from local
+
+    private enum CodingValues: String, Codable {
+        case uploadToRemote
+        case downloadFromRemote
+        case deleteFromRemote
+        case deleteFromLocal
+
+        // Backward compatibility with previously persisted queue payloads
+        case uploadToCloud
+        case downloadFromCloud
+        case deleteFromCloud
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(CodingValues.self)
+        switch value {
+            case .uploadToRemote, .uploadToCloud:
+                self = .uploadToRemote
+            case .downloadFromRemote, .downloadFromCloud:
+                self = .downloadFromRemote
+            case .deleteFromRemote, .deleteFromCloud:
+                self = .deleteFromRemote
+            case .deleteFromLocal:
+                self = .deleteFromLocal
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        let value: CodingValues = switch self {
+            case .uploadToRemote: .uploadToRemote
+            case .downloadFromRemote: .downloadFromRemote
+            case .deleteFromRemote: .deleteFromRemote
+            case .deleteFromLocal: .deleteFromLocal
+        }
+        try container.encode(value)
+    }
 
     var description: String {
         switch self {
-            case .uploadToCloud: return "upload to cloud"
-            case .downloadFromCloud: return "download from cloud"
-            case .deleteFromCloud: return "delete from cloud"
+            case .uploadToRemote: return "upload to remote"
+            case .downloadFromRemote: return "download from remote"
+            case .deleteFromRemote: return "delete from remote"
             case .deleteFromLocal: return "delete from local"
         }
     }
@@ -83,17 +121,18 @@ struct SyncFileState: Equatable, Hashable {
     let contentType: FileStorageContentType
     let modifiedAt: Date
     let size: Int64
-    let downloadStatus: DownloadStatus?  // macOS: iCloud download status, iOS: nil
+    let versionToken: String?
+    let remoteSyncState: RemoteSyncState?
 
     enum Location {
         case local
         case iCloud
     }
 
-    /// iCloud download status (macOS only)
-    enum DownloadStatus: Equatable, Hashable {
+    /// Remote file availability state (backend metadata, optional)
+    enum RemoteSyncState: Equatable, Hashable {
         case notDownloaded  // File not downloaded (placeholder only)
-        case downloaded     // File downloaded but cloud has update
+        case staleLocalCopy // File downloaded but remote has update
         case current        // File is up-to-date
     }
 
@@ -108,13 +147,15 @@ struct SyncFileState: Equatable, Hashable {
         contentType: FileStorageContentType,
         modifiedAt: Date,
         size: Int64,
-        downloadStatus: DownloadStatus? = nil
+        versionToken: String? = nil,
+        remoteSyncState: RemoteSyncState? = nil
     ) {
         self.fileID = fileID
         self.relativePath = relativePath
         self.contentType = contentType
         self.modifiedAt = modifiedAt
         self.size = size
-        self.downloadStatus = downloadStatus
+        self.versionToken = versionToken
+        self.remoteSyncState = remoteSyncState
     }
 }
