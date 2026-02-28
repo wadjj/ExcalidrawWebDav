@@ -70522,6 +70522,105 @@
           }
         }
       }
+    },
+    "startup.webdav.fallback.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "WebDAV setup needed"
+          }
+        }
+      }
+    },
+    "startup.webdav.fallback.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iCloud is unavailable and WebDAV is not configured yet."
+          }
+        }
+      }
+    },
+    "startup.webdav.fallback.localOnly": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local-only now"
+          }
+        }
+      }
+    },
+    "startup.webdav.fallback.configure": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Configure WebDAV"
+          }
+        }
+      }
+    },
+    "startup.webdav.dryRun.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review first WebDAV sync"
+          }
+        }
+      }
+    },
+    "startup.webdav.dryRun.confirm": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enable bidirectional sync"
+          }
+        }
+      }
+    },
+    "startup.webdav.dryRun.cancel": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep local-only"
+          }
+        }
+      }
+    },
+    "startup.webdav.dryRun.message.empty": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A non-destructive scan completed. Review and confirm before enabling writes."
+          }
+        }
+      }
+    },
+    "startup.webdav.dryRun.message.format": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Download-only preview: %lld download, %lld upload, %lld missing. Confirm to enable bidirectional writes."
+          }
+        }
+      }
     }
   },
   "version": "1.0"

@@ -118,3 +118,15 @@ struct SyncFileState: Equatable, Hashable {
         self.downloadStatus = downloadStatus
     }
 }
+
+struct SyncDryRunReport {
+    let uploadCount: Int
+    let downloadCount: Int
+    let deleteFromCloudCount: Int
+    let deleteFromLocalCount: Int
+    let missingCount: Int
+
+    var totalOperations: Int {
+        uploadCount + downloadCount + deleteFromCloudCount + deleteFromLocalCount
+    }
+}
